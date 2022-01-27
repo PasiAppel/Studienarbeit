@@ -1,0 +1,34 @@
+Cross Validation Zeit Komponente 
+nicht in sklearn
+
+Lineare Regression
+Decision Tree
+
+Random Forest
+LightGBM
+
+feature als categorische Variable
+Monat als Zahl eigentlich auch Kategorisch dummie Variablen
+
+numerische Variablen
+
+Zeitzonen
+
+Meter_reading site_0 andere Einheit
+kbtu in kwh
+
+site:id Split
+Meter_type Split
+
+Kaggle Discussions
+
+Motivation
+Modell Auswahl
+Literatur
+
+Meter_reading 0 entfernen?
+
+floor count none = 1 ??? nein
+
+7.März
+
