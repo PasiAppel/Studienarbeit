@@ -1,0 +1,425 @@
+---
+title: "Datenanalyse"
+output: html_notebook
+---
+
+Import packages:
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(geodist)
+library(curl)
+library(jsonlite)
+library(stargazer)
+library(randomForest)
+```
+
+Prepare workspace:
+```{r}
+rm(list=ls(all=TRUE))
+options(scipen=9999)
+set.seed(42)
+```
+
+## Data Understanding
+
+Load and explore training data:
+```{r}
+data_training <- read_csv("data/train.csv", col_types = cols(key = col_character(), pickup_datetime = col_datetime(format = "%Y-%m-%d %H:%M:%S %Z")))
+summary(data_training)
+nrow(data_training)
+```
+
+Visualize distribution of fare amount:
+```{r}
+hist(data_training$fare_amount, xlim = c(0, 80), main = "", xlab = "Fahrtpreis in US-Dollar", ylab = "Anzahl Fahrten", breaks = 100000)
+```
+
+Load and explore test data:
+```{r}
+data_test <- read_csv("data/test.csv", col_types = cols(key = col_character(), pickup_datetime = col_datetime(format = "%Y-%m-%d %H:%M:%S %Z")))
+summary(data_test)
+nrow(data_test)
+```
+
+
+## Data Transformation with Haversine distances
+
+Load and explore training data:
+```{r}
+data_training <- read_csv("data/train.csv", col_types = cols(key = col_character(), pickup_datetime = col_datetime(format = "%Y-%m-%d %H:%M:%S %Z")))
+summary(data_training)
+nrow(data_training)
+```
+
+Load and explore test data:
+```{r}
+data_test <- read_csv("data/test.csv", col_types = cols(key = col_character(), pickup_datetime = col_datetime(format = "%Y-%m-%d %H:%M:%S %Z")))
+summary(data_test)
+nrow(data_test)
+```
+
+Transform training data:
+```{r}
+# Remove observations with missing values
+data_training <- na.omit(data_training)
+
+# Remove observations with unrealistic fare_amount or with passenger_count bigger or smaller than in test data
+data_training <- data_training[data_training$fare_amount >= 1 & data_training$fare_amount <= 1000 & data_training$passenger_count >= min(data_test$passenger_count) & data_training$passenger_count <= max(data_test$passenger_count), ]
+
+# Remove observations with coordinates out of range of the coordinates in test data
+data_training <- data_training[data_training$pickup_longitude >= min(data_test$pickup_longitude) & data_training$pickup_longitude <= max(data_test$pickup_longitude) & data_training$pickup_latitude >= min(data_test$pickup_latitude) & data_training$pickup_latitude <= max(data_test$pickup_latitude) & data_training$dropoff_longitude >= min(data_test$dropoff_longitude) & data_training$dropoff_longitude <= max(data_test$dropoff_longitude) & data_training$dropoff_latitude >= min(data_test$dropoff_latitude) & data_training$dropoff_latitude <= max(data_test$dropoff_latitude), ]
+
+# Remove observations with identical pickup and dropoff locations
+data_training <- data_training[data_training$pickup_longitude != data_training$dropoff_longitude | data_training$pickup_latitude != data_training$dropoff_latitude, ]
+
+# Show number of remaining observations
+nrow(data_training)
+```
+
+Calculate distances for training data:
+```{r message=FALSE, warning=FALSE}
+# Calculate distances
+data_training$distance <- geodist(cbind(data_training$pickup_longitude, data_training$pickup_latitude), cbind(data_training$dropoff_longitude, data_training$dropoff_latitude), paired = TRUE, measure = "haversine")
+
+# Remove unnecessary columns
+data_training <- select(data_training, -pickup_longitude, -pickup_latitude, -dropoff_longitude, -dropoff_latitude)
+```
+
+Calculate distances for test data:
+```{r message=FALSE, warning=FALSE}
+# Calculate distances
+data_test$distance <- geodist(cbind(data_test$pickup_longitude, data_test$pickup_latitude), cbind(data_test$dropoff_longitude, data_test$dropoff_latitude), paired = TRUE, measure = "haversine")
+
+# Remove unnecessary columns
+data_test <- select(data_test, -pickup_longitude, -pickup_latitude, -dropoff_longitude, -dropoff_latitude)
+```
+
+Continue to transform training data:
+```{r}
+# Remove observations with distances out of range of the distances in test data
+data_training <- data_training[data_training$distance >= min(data_test$distance) & data_training$distance <= max(data_test$distance), ]
+
+# Convert pickup_datetime from UTC to EST
+attributes(data_training$pickup_datetime)$tzone <- "America/New_York"
+
+# Extract hour and weekday from pickup_datetime
+data_training$pickup_hour <- as.numeric(format(data_training$pickup_datetime, format = "%H"))
+data_training$pickup_weekday <- weekdays(as.Date(data_training$pickup_datetime))
+
+# Classify observations by the pickup hour
+data_training$fare_category <- ifelse(data_training$pickup_hour>=20 | data_training$pickup_hour<=6, "overnight", ifelse(data_training$pickup_hour>=16 & data_training$pickup_hour<=20, "rush_hour", "standard"))
+
+# Remove unnecessary columns
+data_training <- select(data_training, -pickup_datetime, -pickup_hour)
+
+# Select a subset due to hardware limitations
+data_training <- data_training[1:100000,]
+```
+
+Continue to transform test data:
+```{r}
+# Convert pickup_datetime from UTC to EST
+attributes(data_test$pickup_datetime)$tzone <- "America/New_York"
+
+# Extract hour and weekday from pickup_datetime
+data_test$pickup_hour <- as.numeric(format(data_test$pickup_datetime, format = "%H"))
+data_test$pickup_weekday <- weekdays(as.Date(data_test$pickup_datetime))
+
+# Classify observations by the pickup hour
+data_test$fare_category <- ifelse(data_test$pickup_hour>=20 | data_test$pickup_hour<=6, "overnight", ifelse(data_test$pickup_hour>=16 & data_test$pickup_hour<=20, "rush_hour", "standard"))
+
+# Remove unnecessary columns
+data_test <- select(data_test, -pickup_datetime, -pickup_hour)
+```
+
+Explore and save transformed training and test data:
+```{r}
+# Explore transformed training data
+summary(data_training)
+nrow(data_training)
+
+# Explore transformed test data
+summary(data_test)
+nrow(data_test)
+
+# Save transformed training and test data
+write_csv(data_training, "data/train_transformed_geodist_100K.csv")
+write_csv(data_test, "data/test_transformed_geodist.csv")
+```
+
+
+## Data Transformation with OSRM distances
+
+Load and explore training data:
+```{r}
+data_training <- read_csv("data/train.csv", col_types = cols(key = col_character(), pickup_datetime = col_datetime(format = "%Y-%m-%d %H:%M:%S %Z")))
+summary(data_training)
+nrow(data_training)
+```
+
+Load and explore test data:
+```{r}
+data_test <- read_csv("data/test.csv", col_types = cols(key = col_character(), pickup_datetime = col_datetime(format = "%Y-%m-%d %H:%M:%S %Z")))
+summary(data_test)
+nrow(data_test)
+```
+
+Transform training data:
+```{r}
+# Remove observations with missing values
+data_training <- na.omit(data_training)
+
+# Remove observations with unrealistic fare_amount or with passenger_count bigger or smaller than in test data
+data_training <- data_training[data_training$fare_amount >= 1 & data_training$fare_amount <= 1000 & data_training$passenger_count >= min(data_test$passenger_count) & data_training$passenger_count <= max(data_test$passenger_count), ]
+
+# Remove observations with coordinates out of range of the coordinates in test data
+data_training <- data_training[data_training$pickup_longitude >= min(data_test$pickup_longitude) & data_training$pickup_longitude <= max(data_test$pickup_longitude) & data_training$pickup_latitude >= min(data_test$pickup_latitude) & data_training$pickup_latitude <= max(data_test$pickup_latitude) & data_training$dropoff_longitude >= min(data_test$dropoff_longitude) & data_training$dropoff_longitude <= max(data_test$dropoff_longitude) & data_training$dropoff_latitude >= min(data_test$dropoff_latitude) & data_training$dropoff_latitude <= max(data_test$dropoff_latitude), ]
+
+# Remove observations with identical pickup and dropoff locations
+data_training <- data_training[data_training$pickup_longitude != data_training$dropoff_longitude | data_training$pickup_latitude != data_training$dropoff_latitude, ]
+
+# Show number of remaining observations
+nrow(data_training)
+```
+
+Calculate distances for training data:
+```{r}
+# Select subset of training data due to hardware limitations
+data_training <- data_training[1:200000,]
+
+# Calculate distances using OSRM (https://github.com/Project-OSRM/osrm-backend)
+distances <- c()
+for (row in 1:nrow(data_training)) {
+  tryCatch( {
+    distances[row] <- fromJSON(rawToChar(curl_fetch_memory(paste("http://localhost:5000/route/v1/driving/", data_training[row, "pickup_longitude"], ",", data_training[row, "pickup_latitude"], ";", data_training[row, "dropoff_longitude"], ",", data_training[row, "dropoff_latitude"], "?overview=false", sep = ""))$content))$routes$legs[[1]][["distance"]]
+  },
+  error=function(cond) {
+    print("Error while calculating distance")
+  })
+}
+
+# Append distances to training data and remove observations with missing values
+data_training$distance <- distances
+data_training <- na.omit(data_training)
+
+# Remove unnecessary columns
+data_training <- select(data_training, -pickup_longitude, -pickup_latitude, -dropoff_longitude, -dropoff_latitude)
+```
+
+Calculate distances for test data:
+```{r}
+# Calculate distances
+distances <- c()
+for (row in 1:nrow(data_test)) {
+  tryCatch( {
+    distances[row] <- fromJSON(rawToChar(curl_fetch_memory(paste("http://localhost:5000/route/v1/driving/", data_test[row, "pickup_longitude"], ",", data_test[row, "pickup_latitude"], ";", data_test[row, "dropoff_longitude"], ",", data_test[row, "dropoff_latitude"], "?overview=false", sep = ""))$content))$routes$legs[[1]][["distance"]]
+  },
+  error=function(cond) {
+    print("Error while calculating distance")
+  })
+}
+
+# Append distances to test data
+data_test$distance <- distances
+
+# Remove unnecessary columns
+data_test <- select(data_test, -pickup_longitude, -pickup_latitude, -dropoff_longitude, -dropoff_latitude)
+```
+
+Continue to transform training data:
+```{r}
+# Remove observations with distances out of range of the distances in test data
+data_training <- data_training[data_training$distance >= min(data_test$distance) & data_training$distance <= max(data_test$distance), ]
+
+# Convert pickup_datetime from UTC to EST
+attributes(data_training$pickup_datetime)$tzone <- "America/New_York"
+
+# Extract hour and weekday from pickup_datetime
+data_training$pickup_hour <- as.numeric(format(data_training$pickup_datetime, format = "%H"))
+data_training$pickup_weekday <- weekdays(as.Date(data_training$pickup_datetime))
+
+# Classify observations by the pickup hour
+data_training$fare_category <- ifelse(data_training$pickup_hour>=20 | data_training$pickup_hour<=6, "overnight", ifelse(data_training$pickup_hour>=16 & data_training$pickup_hour<=20, "rush_hour", "standard"))
+
+# Remove unnecessary columns
+data_training <- select(data_training, -pickup_datetime, -pickup_hour)
+
+# Select a subset due to hardware limitations
+data_training <- data_training[1:100000,]
+```
+
+Continue to transform test data:
+```{r}
+# Convert pickup_datetime from UTC to EST
+attributes(data_test$pickup_datetime)$tzone <- "America/New_York"
+
+# Extract hour and weekday from pickup_datetime
+data_test$pickup_hour <- as.numeric(format(data_test$pickup_datetime, format = "%H"))
+data_test$pickup_weekday <- weekdays(as.Date(data_test$pickup_datetime))
+
+# Classify observations by the pickup hour
+data_test$fare_category <- ifelse(data_test$pickup_hour>=20 | data_test$pickup_hour<=6, "overnight", ifelse(data_test$pickup_hour>=16 & data_test$pickup_hour<=20, "rush_hour", "standard"))
+
+# Remove unnecessary columns
+data_test <- select(data_test, -pickup_datetime, -pickup_hour)
+```
+
+Explore and save transformed training and test data:
+```{r}
+# Explore transformed training data
+summary(data_training)
+nrow(data_training)
+
+# Explore transformed test data
+summary(data_test)
+nrow(data_test)
+
+# Save transformed training and test data
+write_csv(data_training, "data/train_transformed_osrm_100K.csv")
+write_csv(data_test, "data/test_transformed_osrm.csv")
+```
+
+
+## Visualization of transformed data
+
+Visualize relationship between calculated distance with Haversine and fare amount:
+```{r}
+data_training <- read_csv("data/train_transformed_geodist_100K.csv", col_types = cols(key = col_character()))
+
+plot(data_training$distance, data_training$fare_amount, xlim = c(0, 50000), ylim = c(0, 150), xlab = "Mit der Haversin-Formel berechnete Fahrtdistanz in Metern", ylab = "Fahrtpreis in US-Dollar")
+```
+
+Visualize relationship between calculated distance with OSRM and fare amount:
+```{r}
+data_training <- read_csv("data/train_transformed_osrm_100K.csv", col_types = cols(key = col_character()))
+
+plot(data_training$distance, data_training$fare_amount, xlim = c(0, 50000), ylim = c(0, 150), xlab = "Mit OSRM berechnete Fahrtdistanz in Metern", ylab = "Fahrtpreis in US-Dollar")
+```
+
+
+## Modeling with Linear Regression
+
+Modeling with Haversine distances:
+```{r warning=FALSE}
+# Load training and test data
+data_training <- read_csv("data/train_transformed_geodist_100K.csv", col_types = cols(key = col_character()))
+data_test <- read_csv("data/test_transformed_geodist.csv", col_types = cols(key = col_character()))
+
+# Fit multiple linear regression model to complete training data with passenger_count and distance as independent variables
+fit <- lm(fare_amount ~ passenger_count + distance + pickup_weekday + fare_category, data = data_training)
+
+# print fitted model
+stargazer(fit, intercept.bottom = FALSE, single.row = TRUE, type = "text")
+
+# use fitted model to make predictions on test data
+fare_amount <- predict(fit, data_test)
+
+# attach predictions as a new column to test set
+data_test <- cbind(data_test, fare_amount)
+
+# remove unnecessary columns
+data_test <- select(data_test, -passenger_count, -distance, -pickup_weekday, -fare_category)
+
+# save as CSV
+write_csv(data_test, "data/submissions/submission_geodist_100K_LM.csv")
+```
+
+Modeling with OSRM distances:
+```{r warning=FALSE}
+# Load training and test data
+data_training <- read_csv("data/train_transformed_osrm_100K.csv", col_types = cols(key = col_character()))
+data_test <- read_csv("data/test_transformed_osrm.csv", col_types = cols(key = col_character()))
+
+# Fit multiple linear regression model to complete training data with passenger_count and distance as independent variables
+fit <- lm(fare_amount ~ passenger_count + distance + pickup_weekday + fare_category, data = data_training)
+
+# print fitted model
+stargazer(fit, intercept.bottom = FALSE, single.row = TRUE, type = "text")
+
+# use fitted model to make predictions on test data
+fare_amount <- predict(fit, data_test)
+
+# attach predictions as a new column to test set
+data_test <- cbind(data_test, fare_amount)
+
+# remove unnecessary columns
+data_test <- select(data_test, -passenger_count, -distance, -pickup_weekday, -fare_category)
+    
+# save as CSV
+write_csv(data_test, "data/submissions/submission_osrm_100K_LM.csv")
+```
+
+
+## Modeling with Random Forest
+
+Evaluate best value for mtry:
+```{r}
+# Load training and test data
+data_training <- read_csv("data/train_transformed_osrm_100K.csv", col_types = cols(key = col_character()))
+data_test <- read_csv("data/test_transformed_osrm.csv", col_types = cols(key = col_character()))
+
+for (m in c(1, 2, 3, 4)) {
+    # perform training
+    rf <- randomForest(fare_amount ~ ., data = data_training, ntree = 50, mtry = m, importance = TRUE)
+    
+    # use fitted model to make predictions on test data
+    fare_amount <- predict(rf, data_test)
+    
+    # attach predictions as a new column to test set
+    data_test <- cbind(data_test, fare_amount)
+    
+    # remove unnecessary columns
+    data_test <- select(data_test, -passenger_count, -distance, -pickup_weekday, -fare_category)
+    
+    # save as CSV
+    write_csv(data_test, paste("data/submissions/submission_osrm_100K_n=50_m=", m, ".csv", sep = ""))
+}
+```
+
+Modeling with Haversine distances:
+```{r}
+# Load training and test data
+data_training <- read_csv("data/train_transformed_geodist_100K.csv", col_types = cols(key = col_character()))
+data_test <- read_csv("data/test_transformed_geodist.csv", col_types = cols(key = col_character()))
+
+for (n in c(25, 50, 100, 200, 300, 500)) {
+    # perform training
+    rf <- randomForest(fare_amount ~ ., data = data_training, ntree = n, mtry = 2, importance = TRUE)
+    
+    # use fitted model to make predictions on test data
+    fare_amount <- predict(rf, data_test)
+    
+    # attach predictions as a new column to test set
+    data_test <- cbind(data_test, fare_amount)
+    
+    # remove unnecessary columns
+    data_test <- select(data_test, -passenger_count, -distance, -pickup_weekday, -fare_category)
+    
+    # save as CSV
+    write_csv(data_test, paste("data/submissions/submission_geodist_100K_n=", n, ".csv", sep = ""))
+}
+```
+
+Modeling with OSRM distances:
+```{r}
+# Load training and test data
+data_training <- read_csv("data/train_transformed_osrm_100K.csv", col_types = cols(key = col_character()))
+data_test <- read_csv("data/test_transformed_osrm.csv", col_types = cols(key = col_character()))
+
+for (n in c(25, 50, 100, 200, 300, 500)) {
+    # perform training
+    rf <- randomForest(fare_amount ~ ., data = data_training, ntree = n, mtry = 2, importance = TRUE)
+    
+    # use fitted model to make predictions on test data
+    fare_amount <- predict(rf, data_test)
+    
+    # attach predictions as a new column to test set
+    data_test <- cbind(data_test, fare_amount)
+    
+    # remove unnecessary columns
+    data_test <- select(data_test, -passenger_count, -distance, -pickup_weekday, -fare_category)
+    
+    # save as CSV
+    write_csv(data_test, paste("data/submissions/submission_osrm_100K_n=", n, ".csv", sep = ""))
+}
+```
